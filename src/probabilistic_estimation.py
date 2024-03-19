@@ -78,6 +78,11 @@ def prob_estimate_for_one_var(var_name, reg_estimate, reg_error, nearby_stn_max,
                 cdfs = calculate_monthly_cdfs(xr.open_dataset(config['file_allstn']),var_name, transform_setting)
                 ens_estimate = data_transformation(ens_estimate, transform_method, transform_setting, 'back_transform',
                                                 times=ds_out['time'].values,cdfs=cdfs)
+            elif transform_method == 'gamma_monthly':
+                ens_estimate = data_transformation(ens_estimate, transform_method, transform_setting, 'back_transform',
+                                                times=ds_out['time'].values, 
+                                                gamma_stations_ds=xr.open_dataset(config['gamma_station_nc']),
+                                                gamma_gridded_ds=xr.open_dataset(config['gamma_gridded_nc']))
             else:
                 ens_estimate = data_transformation(ens_estimate, transform_method, transform_setting, 'back_transform')
 
@@ -99,6 +104,12 @@ def prob_estimate_for_one_var(var_name, reg_estimate, reg_error, nearby_stn_max,
                 cdfs = calculate_monthly_cdfs(xr.open_dataset(config['file_allstn']),var_name, transform_setting)
                 nearby_stn_max = data_transformation(nearby_stn_max+reg_error*precip_err_cap, transform_method, transform_setting, 'back_transform',
                                                 times=ds_out['time'].values,cdfs=cdfs)
+            if transform_method == 'gamma_monthly':
+                nearby_stn_max = data_transformation(nearby_stn_max+reg_error*precip_err_cap, transform_method, transform_setting, 'back_transform',
+                                                times=ds_out['time'].values, 
+                                                gamma_stations_ds=xr.open_dataset(config['gamma_station_nc']),
+                                                gamma_gridded_ds=xr.open_dataset(config['gamma_gridded_nc']))
+                    
             else:
                 nearby_stn_max = data_transformation(nearby_stn_max+reg_error*precip_err_cap, transform_method, transform_setting, 'back_transform')
         else:

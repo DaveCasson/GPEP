@@ -1359,6 +1359,12 @@ def main_regression(config, target):
                 if 'ecdf' in var_name_trans:
                     cdfs = calculate_monthly_cdfs(xr.open_dataset(file_allstn),var_name,transform_settings[transform_vars[vn]])
                     estimates = data_transformation(estimates,transform_vars[vn], transform_settings[transform_vars[vn]], 'back_transform',times=ds_out['time'].values, cdfs=cdfs)
+                elif 'gamma_monthly' in var_name_trans:
+                    estimates = data_transformation(estimates, transform_vars[vn],
+                                                    transform_settings[transform_vars[vn]], 'back_transform',
+                                                    times=ds_stn['time'].values, 
+                                                    gamma_stations_ds=xr.open_dataset(config['gamma_station_nc']), 
+                                                    gamma_gridded_ds=xr.open_dataset(config['gamma_gridded_nc']))
                 else:   
                     estimates = data_transformation(estimates,transform_vars[vn], transform_settings[transform_vars[vn]], 'back_transform')
         else:
@@ -1373,8 +1379,18 @@ def main_regression(config, target):
             dtmp1 = ds_stn[var_name].values
             if (len(var_name_trans) > 0) and (backtransform == False):
                 if 'ecdf' in var_name_trans:
-                    cdfs = calculate_monthly_cdfs(xr.open_dataset(file_allstn),var_name,transform_settings[transform_vars[vn]]) 
+                    if not transform_settings[transform_vars[vn]]['pooled']:
+                        ds_nearinfo = xr.open_dataset(config['file_stn_nearinfo'])
+                    else:
+                        ds_nearinfo = None
+                    cdfs = calculate_monthly_cdfs(xr.open_dataset(file_allstn),ds_nearinfo,var_name,transform_settings[transform_vars[vn]])
                     dtmp2 = data_transformation(estimates,transform_vars[vn], transform_settings[transform_vars[vn]], 'back_transform',times=ds_out['time'].values, cdfs=cdfs)
+                elif 'gamma_monthly' in var_name_trans:
+                    dtmp2 = data_transformation(estimates, transform_vars[vn],
+                                                    transform_settings[transform_vars[vn]], 'back_transform',
+                                                    times=ds_stn['time'].values, 
+                                                    gamma_stations_ds=xr.open_dataset(config['gamma_station_nc']), 
+                                                    gamma_gridded_ds=xr.open_dataset(config['gamma_gridded_nc']))
                 else:
                     dtmp2 = data_transformation(estimates,transform_vars[vn], transform_settings[transform_vars[vn]], 'back_transform')
             else:

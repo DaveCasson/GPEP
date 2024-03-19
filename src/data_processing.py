@@ -4,8 +4,9 @@ import os, time, sys
 import pandas as pd
 import numpy as np
 import xarray as xr
-from scipy.stats import norm, gamma
+from scipy.stats import gamma, norm
 from scipy.interpolate import interp1d
+
 ########################################################################################################################
 # data transformation
 
@@ -44,6 +45,18 @@ def boxcox_back_transform_biasadjustment(data, sigma_square, texp=4):
 
     return datat
 
+def interpolate_with_noise(cdfs, noise_level=1e-6):
+    # Add small random noise to the 'Value' column
+    for stn in cdfs.keys():
+        for month in cdfs[stn].keys():
+            cdf = cdfs[stn][month]
+            cdf['Value'] += np.random.uniform(-noise_level, noise_level, cdf.shape[0])
+            # Optional: Sort by 'Value' if needed
+            cdf.sort_values(by='Value', inplace=True)
+            cdfs[stn][month] = cdf
+
+    return cdfs
+
 def create_cdf_df(data):
     """Helper function to calculate the CDF for a given month."""
     valid_data = data[data > 0]
@@ -51,12 +64,59 @@ def create_cdf_df(data):
     cdf_values = np.arange(1, len(sorted_data) + 1) / len(sorted_data)
     return pd.DataFrame({'Value': sorted_data, 'CDF': cdf_values})
 
-def calculate_monthly_cdfs(ds,var_name,settings):
+def add_nearby_stations_to_cdfs(cdfs, all_station_data_ds, nearby_station_ds,var='prcp', min_obs=10):
+    """Add nearby stations to the CDFs if the number of observations is less than a set value."""
+
+    measured_var = all_station_data_ds[var]
+    # Get indexes for valid stations (at least one non-NaN values)
+    stations_with_values = []
+    for stn_index in range(measured_var.sizes['stn']):
+        # Check if there are any non-NaN values in this station
+        if np.any(~np.isnan(measured_var.sel(stn=stn_index))):
+            stations_with_values.append(stn_index)
+
+    nearby_stations = nearby_station_ds['nearIndex_InStn_prcp'].values
+
+    for i in range(1,13):
+
+        for stn_index in stations_with_values:
+            #Check number of available observations
+            num_obs = cdfs[stn_index][i]['Value'].size
+            station_cdf = cdfs[stn_index][i]['Value'].values
+
+            #Set initial empty arrays
+            near_station_cdf_values = np.array([])
+            station_cdf = np.array([])
+
+            if num_obs < min_obs:
+                iteration = 0
+                
+                while num_obs < min_obs and iteration < 5:
+                    # Read nearby station cdf
+                    near_station_cdf = cdfs[nearby_stations[stn_index][iteration]][i]
+
+                    #Combine values
+                    if iteration == 0:
+                        station_cdf = cdfs[stn_index][i]['Value'].values
+                    near_station_cdf_values = near_station_cdf['Value'].values
+                    station_cdf = np.concatenate((station_cdf,near_station_cdf_values))
+                    
+                    #Update checks
+                    num_obs = station_cdf.size
+                    iteration += 1
+                    
+                cdfs[stn_index][i] = create_cdf_df(station_cdf)
+    
+    return cdfs
+
+def calculate_monthly_cdfs(stn_ds, var_name, settings, nearby_stn_ds=None):
     """Create monthly empiricial CDFs."""
 
     pooled = settings.get('pooled', True)
+    min_num_obs = settings.get('min_num_obs', 20)
+    add_noise = settings.get('add_noise', True)
 
-    df = pd.DataFrame(data=ds[var_name].T.values, index=pd.to_datetime(ds['time']))
+    df = pd.DataFrame(data=stn_ds[var_name].T.values, index=pd.to_datetime(stn_ds['time']))
 
     if pooled:
         cdfs = {month: create_cdf_df(df[df.index.month == month].values.flatten())
@@ -65,9 +125,17 @@ def calculate_monthly_cdfs(ds,var_name,settings):
         cdfs = {station: {month: create_cdf_df(df[station][df.index.month == month].dropna())
                          for month in range(1, 13)}
                 for station in df.columns}
+        
+        if add_noise:
+            cdfs = interpolate_with_noise(cdfs)
+
+        if nearby_stn_ds is not None:
+        # Check for minimum number of observations, and if not met, add nearby stations observations
+            cdfs = add_nearby_stations_to_cdfs(cdfs, stn_ds, nearby_stn_ds, var=var_name, min_obs=min_num_obs)
+
     return cdfs
 
-def normal_quantile_transform(data,times, monthly_cdfs, settings):
+def normal_quantile_transform(data, times, monthly_cdfs, settings):
     """
     Apply a normal quantile transform to the precipitation data using a pooled monthly empirical cdf.
     """
@@ -92,8 +160,8 @@ def normal_quantile_transform(data,times, monthly_cdfs, settings):
             
             if empirical_cdf is not None and not empirical_cdf.empty:
 
-                cdf_interp = interp1d(empirical_cdf['Value'], empirical_cdf['CDF'],bounds_error=True)
-                cum_probs = np.clip(cdf_interp(month_data),0,0.9999)
+                cdf_interp = interp1d(empirical_cdf['Value'], empirical_cdf['CDF'],bounds_error=False)
+                cum_probs = np.clip(cdf_interp(month_data),0,0.99999)
                 z_scores = norm.ppf(cum_probs)
             
                 if pooled:
@@ -155,18 +223,7 @@ def inverse_normal_quantile_transform(data,time,monthly_cdfs, settings):
                     cum_probs = norm.cdf(z_score_float)
                     # Use linear interpolation to sample from probabilities back to values
                     original_values = value_interp(cum_probs)
-                
-                elif interp_method == 'gamma':
-                    # Fit a gamma distribution to the empirical CDF
-                    a, loc, scale = gamma.fit(empirical_cdf['Value'])
-                    # Define the inverse CDF (percent point function) of the fitted gamma distribution
-                    gamma_ppf = lambda cum_probs: gamma.ppf(cum_probs, a, loc, scale)
-                    # Calculate cumulative probabilities from z scores
-                    z_score_float = z_scores.values.astype(float)
-                    cum_probs = norm.cdf(z_score_float)
-                    # Use gamma distribution to sample from probabilities back to values
-                    original_values = gamma_ppf(cum_probs)
-                
+
                 #Filter small values created from filling of nan during first transform
                 original_values[original_values < min_est_value] = np.nan
                 #Convert all nan to zero
@@ -193,7 +250,134 @@ def inverse_normal_quantile_transform(data,time,monthly_cdfs, settings):
 
     return back_transform_array
 
-def data_transformation(data, method, settings, mode='transform',times=None,cdfs=None):
+def gamma_transform(data, times, settings, gamma_stations_ds):
+
+    """
+    Apply gamma transform based on pre-calculated mean and value values from empirical data
+    """
+
+    # Read settings and if not available, assign default value
+    min_z_value = settings.get('min_z_value', -4)
+
+    df = pd.DataFrame(data=data.T, index=times)
+    transformed_data = pd.DataFrame(index=df.index, columns=df.columns)
+
+    months = range(1, 13)
+    stations = df.columns
+
+    for month in months:
+        for station in stations:    
+            #Read data for specific month, and remove all zero and negative data
+            month_data = df[station][df.index.month == month]
+            month_data = month_data[month_data > 0]
+            
+            if np.all(np.isnan(month_data)):
+                transformed_data.loc[month_data.index, station] = np.nan
+            else:            
+                #Read pre-computed gamma values
+                a = gamma_stations_ds['gamma_shape'].sel(station=station,month=month).values.astype(float)
+                scale = gamma_stations_ds['gamma_scale'].sel(station=station,month=month).values.astype(float)
+                loc = np.zeros_like(scale)
+                
+                # Perform transformation
+                cdf_interp = lambda x: gamma.cdf(x, a=a, loc=loc, scale=scale)
+                cum_probs = cdf_interp(month_data)
+                z_scores = norm.ppf(cum_probs)
+
+                #Write to output array
+                transformed_data.loc[month_data.index, station] = z_scores
+                
+
+    # Convert data array to float datatype
+    transformed_data_array = transformed_data.astype(float).to_numpy()
+
+    #Assign min value to all nan
+    transformed_data_filled = np.nan_to_num(transformed_data_array,nan=min_z_value)
+
+    return transformed_data_filled
+
+def gamma_back_transform(data, time, settings, gamma_station_ds, gamma_gridded_ds=None):
+    """
+    Reverse the normal quantile transform applied to the precipitation data using a monthly empirical cdf.
+    """
+ 
+    #Read settings value, and if not assign default value
+    min_est_value = settings.get('min_est_value', 0.01)
+
+    if data.ndim == 2: #Station back-transform
+        transformed_data = pd.DataFrame(data.T, index=time)
+        back_transformed_data = pd.DataFrame(index=transformed_data.index, columns=transformed_data.columns)
+
+    elif data.ndim == 3: #Grid back-transform
+        flattened_data = data.reshape(-1, len(data[0,0,]))
+        transformed_data = pd.DataFrame(flattened_data.T, index=time)
+        back_transformed_data = pd.DataFrame(index=transformed_data.index, columns=transformed_data.columns)
+
+    months = range(1, 13)
+    stations = [transformed_data.columns if data.ndim == 2 else [None]]
+    for month in months:
+        for station in stations:
+
+            if data.ndim == 2:
+                z_scores = transformed_data[station][transformed_data.index.month == month] 
+            else:
+                z_scores = transformed_data[transformed_data.index.month == month]
+
+            if z_scores.empty:
+                if data.ndim == 2:
+                    back_transformed_data.loc[z_scores.index, station] = np.zeros#(len(transformed_data.columns))
+                else:
+                    back_transformed_data.loc[z_scores.index, :] = np.zeros
+            else:
+                if data.ndim == 2:
+                    gamma_shape = gamma_station_ds['gamma_shape'].sel(station=station,month=month).values.astype(float)
+                    gamma_scale = gamma_station_ds['gamma_scale'].sel(station=station,month=month).values.astype(float)
+                    # Calculate cumulative probabilities from z scores
+                    z_score_float = z_scores.values.astype(float)
+                    cum_probs = norm.cdf(z_score_float)
+                    gamma_ppf = lambda x: gamma.ppf(x, a=gamma_shape, loc=0, scale=gamma_scale)
+                    # Use gamma distribution to sample from probabilities back to values
+                    original_values = gamma_ppf(cum_probs)
+                if data.ndim == 3:
+                    a = gamma_gridded_ds['gamma_shape'].sel(month=month).values.astype(float)
+                    scale = gamma_gridded_ds['gamma_scale'].sel(month=month).values.astype(float)
+                    loc = np.zeros_like(scale)
+                    a_flat = a.flatten()
+                    loc_flat = loc.flatten()
+                    scale_flat = scale.flatten()
+                    # Calculate cumulative probabilities from z scores
+                    z_score_float = z_scores.values.astype(float)
+                    cum_probs = norm.cdf(z_score_float)
+                    cum_probs = np.clip(cum_probs, 0,0.99999)
+                    original_values = np.zeros_like(cum_probs)
+                    # Loop over each timestep
+                    gamma_ppf = lambda x: gamma.ppf(x, a=a_flat, loc=loc_flat, scale=scale_flat)
+                    for i in range(cum_probs.shape[0]):
+                        original_values[i] = gamma_ppf(cum_probs[i])
+                
+                #Filter small values created from filling of nan during first transform
+                original_values[original_values < min_est_value] = np.nan
+
+                #Convert all nan to zero
+                original_values = np.nan_to_num(original_values)
+
+                if data.ndim == 3:
+                    back_transformed_data.loc[z_scores.index, :] = original_values
+                else:
+                    back_transformed_data.loc[z_scores.index, station] = original_values
+
+
+    #Convert to array
+    back_transform_array = back_transformed_data.astype(float).to_numpy()
+    
+    #Extra transform for grid regression
+    if data.ndim == 3:
+        back_transform_array_interim = back_transform_array.T
+        back_transform_array = back_transform_array_interim.reshape(np.shape(data))
+
+    return back_transform_array
+
+def data_transformation(data, method, settings, mode='transform',times=None,cdfs=None,gamma_stations_ds=None,gamma_gridded_ds=None):
     if method == 'boxcox':
         if mode == 'transform':
             data = boxcox_transform(data, settings['exponent'])
@@ -207,6 +391,17 @@ def data_transformation(data, method, settings, mode='transform',times=None,cdfs
             data = data.T
         elif mode == 'back_transform':
             data = inverse_normal_quantile_transform(data,times,cdfs,settings)
+            if data.ndim == 2:
+                data = data.T
+        else:
+            print('Unknown transformation mode: entry=', mode)
+            sys.exit()
+    elif method == 'gamma_monthly':
+        if mode == 'transform':
+            data = gamma_transform(data,times,settings,gamma_stations_ds)
+            data = data.T
+        elif mode == 'back_transform':
+            data = gamma_back_transform(data,times,settings,gamma_stations_ds,gamma_gridded_ds)
             if data.ndim == 2:
                 data = data.T
         else:
@@ -354,6 +549,11 @@ def merge_stndata_into_single_file(config):
 
         del var_values
 
+    if 'gamma_monthly' in config['transform'].keys():
+        config['gamma_station_nc'] = f"{config['path_stn_info']}/gamma_station_params.nc"
+        config['gamma_gridded_nc'] = f"{config['path_stn_info']}/gamma_gridded_params.nc"
+
+
     # convert input vars to target vars
     for mapping in mapping_InOut_var:
         mapping = mapping.replace(' ', '')
@@ -394,11 +594,16 @@ def merge_stndata_into_single_file(config):
                 print(f'{tvar} exists in ds_stn. no need to perform transformation')
                 continue
             ds_stn[tvar] = ds_stn[vari].copy()
+
             if transform_vars[i] == 'ecdf':
                 cdfs = calculate_monthly_cdfs(ds_stn,target_vars[i],transform_settings[transform_vars[i]])
                 ds_stn[tvar].values = data_transformation(ds_stn[target_vars[i]].values, transform_vars[i],
                                                 transform_settings[transform_vars[i]], 'transform',
                                                 times=ds_stn['time'].values,cdfs=cdfs)
+            elif transform_vars[i] == 'gamma_monthly':
+                ds_stn[tvar].values = data_transformation(ds_stn[target_vars[i]].values, transform_vars[i],
+                                                transform_settings[transform_vars[i]], 'transform',
+                                                times=ds_stn['time'].values, gamma_stations_ds=xr.open_dataset(config['gamma_station_nc']))
             else:
                 ds_stn[tvar].values = data_transformation(ds_stn[target_vars[i]].values, transform_vars[i],
                                                 transform_settings[transform_vars[i]], 'transform')
