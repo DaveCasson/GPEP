@@ -1167,7 +1167,9 @@ def main_regression(config, target):
     ########################################################################################################################
     # initialize outputs
     with xr.open_dataset(file_allstn) as ds_stn:
+        print(f'{date_start},{date_end}')
         ds_stn = ds_stn.sel(time=slice(date_start, date_end))
+        print(ds_stn)
         timeaxis = ds_stn.time.values
 
     ds_out = xr.Dataset()
@@ -1241,10 +1243,15 @@ def main_regression(config, target):
 
             # adjust max/min limits
             if minRange_vars[vn] != -np.inf:
-                minRange_vars[vn] = data_transformation(minRange_vars[vn], transform_vars[vn], transform_settings[transform_vars[vn]], 'transform')
+                if transform_vars[vn] == 'ecdf' or transform_vars[vn] == 'gamma_monthly':
+                    minRange_vars[vn] = -np.inf
+                else:
+                    minRange_vars[vn] = data_transformation(minRange_vars[vn], transform_vars[vn], transform_settings[transform_vars[vn]], 'transform')
             if maxRange_vars[vn] != np.inf:
-                maxRange_vars[vn] = data_transformation(maxRange_vars[vn], transform_vars[vn], transform_settings[transform_vars[vn]], 'transform')
-
+                if transform_vars[vn] == 'ecdf' or transform_vars[vn] == 'gamma_monthly':
+                    maxRange_vars[vn] = np.inf
+                else:
+                    maxRange_vars[vn] = data_transformation(maxRange_vars[vn], transform_vars[vn], transform_settings[transform_vars[vn]], 'transform')
         else:
             var_name_trans = ''
 
@@ -1357,7 +1364,8 @@ def main_regression(config, target):
             else:
                 var_name_save = var_name
                 if 'ecdf' in var_name_trans:
-                    cdfs = calculate_monthly_cdfs(xr.open_dataset(file_allstn),var_name,transform_settings[transform_vars[vn]])
+                    with xr.open_dataset(file_allstn) as ds_stn:
+                        cdfs = calculate_monthly_cdfs(ds_stn,var_name,transform_settings[transform_vars[vn]])
                     estimates = data_transformation(estimates,transform_vars[vn], transform_settings[transform_vars[vn]], 'back_transform',times=ds_out['time'].values, cdfs=cdfs)
                 elif 'gamma_monthly' in var_name_trans:
                     estimates = data_transformation(estimates, transform_vars[vn],
@@ -1379,11 +1387,8 @@ def main_regression(config, target):
             dtmp1 = ds_stn[var_name].values
             if (len(var_name_trans) > 0) and (backtransform == False):
                 if 'ecdf' in var_name_trans:
-                    if not transform_settings[transform_vars[vn]]['pooled']:
-                        ds_nearinfo = xr.open_dataset(config['file_stn_nearinfo'])
-                    else:
-                        ds_nearinfo = None
-                    cdfs = calculate_monthly_cdfs(xr.open_dataset(file_allstn),ds_nearinfo,var_name,transform_settings[transform_vars[vn]])
+                    with xr.open_dataset(file_allstn) as stn_ds:
+                        cdfs = calculate_monthly_cdfs(stn_ds,var_name,transform_settings[transform_vars[vn]])
                     dtmp2 = data_transformation(estimates,transform_vars[vn], transform_settings[transform_vars[vn]], 'back_transform',times=ds_out['time'].values, cdfs=cdfs)
                 elif 'gamma_monthly' in var_name_trans:
                     dtmp2 = data_transformation(estimates, transform_vars[vn],

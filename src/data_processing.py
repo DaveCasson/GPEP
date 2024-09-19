@@ -4,6 +4,7 @@ import os, time, sys
 import pandas as pd
 import numpy as np
 import xarray as xr
+from pathlib import Path
 from scipy.stats import gamma, norm
 from scipy.interpolate import interp1d
 
@@ -262,6 +263,9 @@ def gamma_transform(data, times, settings, gamma_stations_ds):
     df = pd.DataFrame(data=data.T, index=times)
     transformed_data = pd.DataFrame(index=df.index, columns=df.columns)
 
+    # Read all stations that only contain nan values
+    nan_columns = [col for col in df.columns if df[col].isna().all()]
+
     months = range(1, 13)
     stations = df.columns
 
@@ -273,7 +277,7 @@ def gamma_transform(data, times, settings, gamma_stations_ds):
             
             if np.all(np.isnan(month_data)):
                 transformed_data.loc[month_data.index, station] = np.nan
-            else:            
+            else:
                 #Read pre-computed gamma values
                 a = gamma_stations_ds['gamma_shape'].sel(station=station,month=month).values.astype(float)
                 scale = gamma_stations_ds['gamma_scale'].sel(station=station,month=month).values.astype(float)
@@ -283,7 +287,6 @@ def gamma_transform(data, times, settings, gamma_stations_ds):
                 cdf_interp = lambda x: gamma.cdf(x, a=a, loc=loc, scale=scale)
                 cum_probs = cdf_interp(month_data)
                 z_scores = norm.ppf(cum_probs)
-
                 #Write to output array
                 transformed_data.loc[month_data.index, station] = z_scores
                 
@@ -293,6 +296,11 @@ def gamma_transform(data, times, settings, gamma_stations_ds):
 
     #Assign min value to all nan
     transformed_data_filled = np.nan_to_num(transformed_data_array,nan=min_z_value)
+
+    #Remove stations that had nan from start
+    for col_index, col_name in enumerate(df.columns):
+        if col_name in nan_columns:
+            transformed_data_filled[:, col_index] = np.nan
 
     return transformed_data_filled
 
@@ -325,17 +333,20 @@ def gamma_back_transform(data, time, settings, gamma_station_ds, gamma_gridded_d
 
             if z_scores.empty:
                 if data.ndim == 2:
-                    back_transformed_data.loc[z_scores.index, station] = np.zeros#(len(transformed_data.columns))
+                    back_transformed_data.loc[z_scores.index, station] = np.zeros
                 else:
                     back_transformed_data.loc[z_scores.index, :] = np.zeros
             else:
                 if data.ndim == 2:
                     gamma_shape = gamma_station_ds['gamma_shape'].sel(station=station,month=month).values.astype(float)
                     gamma_scale = gamma_station_ds['gamma_scale'].sel(station=station,month=month).values.astype(float)
+
                     # Calculate cumulative probabilities from z scores
                     z_score_float = z_scores.values.astype(float)
                     cum_probs = norm.cdf(z_score_float)
+                    cum_probs = np.clip(cum_probs,0,0.9999999999999999)
                     gamma_ppf = lambda x: gamma.ppf(x, a=gamma_shape, loc=0, scale=gamma_scale)
+
                     # Use gamma distribution to sample from probabilities back to values
                     original_values = gamma_ppf(cum_probs)
                 if data.ndim == 3:
@@ -345,10 +356,12 @@ def gamma_back_transform(data, time, settings, gamma_station_ds, gamma_gridded_d
                     a_flat = a.flatten()
                     loc_flat = loc.flatten()
                     scale_flat = scale.flatten()
+                    
                     # Calculate cumulative probabilities from z scores
                     z_score_float = z_scores.values.astype(float)
                     cum_probs = norm.cdf(z_score_float)
-                    cum_probs = np.clip(cum_probs, 0,0.99999)
+                    cum_probs = np.clip(cum_probs,0,0.9999999999999999)
+
                     original_values = np.zeros_like(cum_probs)
                     # Loop over each timestep
                     gamma_ppf = lambda x: gamma.ppf(x, a=a_flat, loc=loc_flat, scale=scale_flat)
@@ -478,12 +491,17 @@ def merge_stndata_into_single_file(config):
     else:
         mapping_InOut_var = []
 
-        
     if 'overwrite_merged_stnfile' in config:
         overwrite_merged_stnfile = config['overwrite_merged_stnfile']
     else:
         overwrite_merged_stnfile = True
-
+    
+    if 'gamma_monthly' in transform_vars:
+        infile_path = Path(config['infile_grid_domain'])
+        config['gamma_station_nc'] = f"{infile_path.parent}/gamma_station_params.nc"
+        config['gamma_gridded_nc'] = f"{infile_path.parent}/gamma_gridded_params.nc"
+        print('Gamma station and gridded parameters read')
+        
     # settings and prints
     print('#' * 50)
     print('Merging individual station files to one single file')
@@ -548,11 +566,6 @@ def merge_stndata_into_single_file(config):
             ds_stn[input_vars[i]] = xr.DataArray(var_values[:, :, i], dims=('stn', 'time'))
 
         del var_values
-
-    if 'gamma_monthly' in config['transform'].keys():
-        config['gamma_station_nc'] = f"{config['path_stn_info']}/gamma_station_params.nc"
-        config['gamma_gridded_nc'] = f"{config['path_stn_info']}/gamma_gridded_params.nc"
-
 
     # convert input vars to target vars
     for mapping in mapping_InOut_var:

@@ -246,8 +246,10 @@ def get_near_station_info(config):
         ########################################################################################################################
         # find nearby stations for stations/grids
         t11=time.time()
+        print('Started grid calculation')
         nearIndex_Grid, nearDistance_Grid   = find_nearstn_for_Grids(lat_stn, lon_stn, lat_grid, lon_grid, mask_grid, try_radius, nearstn_min,
                                                                    nearstn_max, initial_distance, num_processes)
+        print('Ended grid calculation')
         nearIndex_InStn, nearDistance_InStn = find_nearstn_for_InStn(lat_stn, lon_stn, try_radius, nearstn_min, nearstn_max, initial_distance)
         t22 = time.time()
         print('Time cost (s) of getting near station index and distance:', t22-t11)
